@@ -1,0 +1,122 @@
+from flask import Flask, request, redirect, session, g
+import sqlite3, os
+from werkzeug.security import generate_password_hash, check_password_hash
+
+app = Flask(__name__)
+app.secret_key = "securekey"
+
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax"
+)
+
+DB_FILE = "bank.db"
+
+def get_db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DB_FILE)
+    return g.db
+
+@app.teardown_appcontext
+def close_db(e=None):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+def init_db():
+    db = get_db()
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        password TEXT,
+        balance REAL,
+        account TEXT
+    )
+    """)
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT,
+        text TEXT
+    )
+    """)
+    db.commit()
+
+@app.before_request
+def before():
+    init_db()
+
+def user():
+    return session.get("user")
+
+@app.route("/")
+def home():
+    if not user():
+        return redirect("/login")
+    db = get_db()
+    u = user()
+    row = db.execute("SELECT balance, account FROM users WHERE username=?", (u,)).fetchone()
+    return f"<h1>£{row[0]}</h1><p>Account: {row[1]}</p><a href='/logout'>Logout</a>"
+
+@app.route("/register", methods=["GET","POST"])
+def register():
+    if request.method == "POST":
+        db = get_db()
+        u = request.form["username"]
+        p = generate_password_hash(request.form["password"])
+
+        try:
+            db.execute("INSERT INTO users VALUES (?,?,?,?)", (u, p, 0, str(os.urandom(4).hex())))
+            db.commit()
+            return redirect("/login")
+        except:
+            return "User exists"
+
+    return """<form method='post'>
+    <input name='username'>
+    <input name='password' type='password'>
+    <button>Create</button>
+    </form>"""
+
+@app.route("/login", methods=["GET","POST"])
+def login():
+    if request.method == "POST":
+        db = get_db()
+        u = request.form["username"]
+        p = request.form["password"]
+
+        row = db.execute("SELECT password FROM users WHERE username=?", (u,)).fetchone()
+        if row and check_password_hash(row[0], p):
+            session["user"] = u
+            return redirect("/")
+        return "Invalid login"
+
+    return """<form method='post'>
+    <input name='username'>
+    <input name='password' type='password'>
+    <button>Login</button>
+    </form>"""
+
+@app.route("/deposit", methods=["POST"])
+def deposit():
+    if not user(): return redirect("/login")
+    try:
+        amt = float(request.form["amount"])
+        if amt <= 0: return "Invalid"
+    except:
+        return "Invalid"
+
+    db = get_db()
+    u = user()
+    db.execute("UPDATE users SET balance = balance + ? WHERE username=?", (amt, u))
+    db.execute("INSERT INTO transactions (username, text) VALUES (?,?)", (u, f"Deposit £{amt}"))
+    db.commit()
+    return redirect("/")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
+
+if __name__ == "__main__":
+    app.run()
